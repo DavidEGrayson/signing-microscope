@@ -31,7 +31,9 @@ machine_type_name = {
   0x8664 => "x64",
   0x014c => "i386",
 }.fetch(machine_type, "unknown")
+time_string = Time.at(creation_time).utc.strftime "%Y-%m-%d %H:%M:%S"
 puts "Machine type: #{machine_type_name}"
+puts "Creation time: #{time_string}"
 
 optional_header = f.read(optional_header_size)
 
@@ -53,4 +55,30 @@ end
 check_offset.(resource_section_offset, resource_section_size)
 
 f.seek(resource_section_offset)
-p f.read(resource_section_size)
+resource_section = f.read(resource_section_size)
+f.seek(resource_section_offset)
+
+puts "Resource section: 0x%x" % resource_section_offset
+
+while true
+  dir_header = f.read(16).unpack('L<L<S<S<S<S<')
+  _, time, major, minor, name_entries_count, id_entries_count = dir_header
+  name_entries_count.times do
+    name_offset, offset = f.read(8).unpack('L<L<')
+    type = offset[31] == 1 ? :directory : :leaf
+    offset &= 0x7FFF_FFFF
+    name_offset &= 0x7FFF_FFFF
+    name_size = resource_section[name_offset, 2].unpack('<S')[0] * 2
+    name = resource_section[name_offset + 2, name_size]
+    name = name.force_encoding('UTF-16LE').encode('UTF-8')
+    p [type, name, offset]
+  end
+  id_entries_count.times do
+    id, offset = f.read(8).unpack('L<L<')
+    type = offset[31] == 1 ? :directory : :leaf
+    offset &= 0x7FFF_FFFF
+    p [type, id, offset]
+  end
+  puts "Current offset: 0x%x" % f.tell
+  break
+end
