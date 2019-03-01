@@ -1,7 +1,15 @@
 #!/usr/bin/env ruby
 
-require_relative 'binary_reader'
+class File
+  def preserve_position
+    position = tell
+    yield
+    seek(position)
+  end
+end
+
 require_relative 'hex_inspect'
+require_relative 'file_window'
 
 if ARGV.size != 1
   $stderr.puts "Usage: crypt32_dll_dump.rb DLLFILE"
@@ -10,75 +18,96 @@ end
 filename = ARGV.fetch(0)
 file_size = File.size(filename)
 
-check_offset = Proc.new do |offset, size = 0|
-  raise "Bad file offset" if offset >= file_size
-  raise "Bad file are length" if offset + size >= file_size
-end
+def search_pe_file(f)
+  f.seek(0x3C)
+  pe_signature_offset = f.read(4).unpack('L<')[0]
+  f.seek(pe_signature_offset)
+  pe_magic = f.read(4)
+  raise "Bad PE signature" if pe_magic != "PE\x00\x00"
 
-f = File.open(filename, 'rb')
-f.seek(0x3C)
-pe_signature_offset = f.read_u32
-check_offset.(pe_signature_offset)
-f.seek(pe_signature_offset)
-pe_magic = f.read(4)
-raise "Bad PE signature" if pe_magic != "PE\x00\x00"
+  coff_header = f.read(20).unpack('S<S<L<L<L<S<S<')
+  machine_type, section_count, creation_time, symbol_table_offset, symbol_count,
+    optional_header_size, _ = coff_header
 
-coff_header = f.read(20).unpack('S<S<L<L<L<S<S<')
-machine_type, section_count, creation_time, symbol_table_offset, symbol_count,
-  optional_header_size, _ = coff_header
+  machine_type_name = {
+    0x8664 => "x64",
+    0x014c => "i386",
+  }.fetch(machine_type, "unknown")
+  time_string = Time.at(creation_time).utc.strftime "%Y-%m-%d %H:%M:%S"
+  puts "Machine type: #{machine_type_name}"
+  puts "Creation time: #{time_string}"
 
-machine_type_name = {
-  0x8664 => "x64",
-  0x014c => "i386",
-}.fetch(machine_type, "unknown")
-time_string = Time.at(creation_time).utc.strftime "%Y-%m-%d %H:%M:%S"
-puts "Machine type: #{machine_type_name}"
-puts "Creation time: #{time_string}"
+  optional_header = f.read(optional_header_size)
 
-optional_header = f.read(optional_header_size)
-
-resource_section_offset = nil
-resource_section_size = nil
-section_count.times do
-  section_header = f.read(40).unpack('Z8L<L<L<L<L<L<S<S<L<')
-  name, virtual_size, virtual_address, raw_data_size, raw_data_offset,
-    relocations_offset, _, relocations_size, _, _ = section_header
-  if name == ".rsrc"
-    resource_section_size = raw_data_size
-    resource_section_offset = raw_data_offset
+  resource_section_offset = nil
+  resource_section_size = nil
+  section_count.times do
+    section_header = f.read(40).unpack('Z8L<L<L<L<L<L<S<S<L<')
+    name, virtual_size, virtual_address, raw_data_size, raw_data_offset,
+      relocations_offset, _, relocations_size, _, _ = section_header
+    if name == ".rsrc"
+      resource_section_size = raw_data_size
+      resource_section_offset = raw_data_offset
+    end
   end
+
+  if !resource_section_offset
+    raise "Could not find .rsrc section."
+  end
+  puts "Resource section size: " + resource_section_size.to_s
+  search_resource_section(
+    FileWindow.new(f, resource_section_offset, resource_section_size))
 end
 
-if !resource_section_offset
-  raise "Could not find .rsrc section."
+def search_resource_section(f)
+  puts "Resource section: 0x%x" % f.window_offset
+  section = f.read
+
+  search_resource_directory(section, f, 0, [])
+
+  # 2nd-level: 6 u32s
+  # 3rd-level: 4 u32s
 end
-check_offset.(resource_section_offset, resource_section_size)
 
-f.seek(resource_section_offset)
-resource_section = f.read(resource_section_size)
-f.seek(resource_section_offset)
+def search_resource_directory(section, f, offset, path)
+  f.seek(offset)
 
-puts "Resource section: 0x%x" % resource_section_offset
-
-while true
   dir_header = f.read(16).unpack('L<L<S<S<S<S<')
   _, time, major, minor, name_entries_count, id_entries_count = dir_header
+
+  entries = []
   name_entries_count.times do
     name_offset, offset = f.read(8).unpack('L<L<')
     type = offset[31] == 1 ? :directory : :leaf
     offset &= 0x7FFF_FFFF
     name_offset &= 0x7FFF_FFFF
-    name_size = resource_section[name_offset, 2].unpack('<S')[0] * 2
-    name = resource_section[name_offset + 2, name_size]
+    name_size = section[name_offset, 2].unpack('S<')[0] * 2
+    name = section[name_offset + 2, name_size]
     name = name.force_encoding('UTF-16LE').encode('UTF-8')
-    p [type, name, offset]
+    entries << [type, name, offset]
   end
   id_entries_count.times do
     id, offset = f.read(8).unpack('L<L<')
     type = offset[31] == 1 ? :directory : :leaf
     offset &= 0x7FFF_FFFF
-    p [type, id, offset]
+    entries << [type, id, offset]
   end
-  puts "Current offset: 0x%x" % f.tell
-  break
+
+  entries.each do |type, id, offset|
+    if type == :directory
+      search_resource_directory(section, f, offset, path + [id])
+    else
+      search_resource_leaf(section, f, offset, path + [id])
+    end
+  end
 end
+
+def search_resource_leaf(section, f, offset, path)
+  f.seek(offset)
+  leaf = f.read(16).unpack('L<L<L<L<')
+  address, size, _, _ = leaf
+  puts "Leaf %s at %d: 0x%x %d" % [path.inspect, offset, address, size]
+end
+
+f = File.open(filename, 'rb')
+search_pe_file(f)
