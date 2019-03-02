@@ -3,13 +3,13 @@
 class File
   def preserve_position
     position = tell
-    yield
+    r = yield
     seek(position)
+    r
   end
 end
 
 require_relative 'hex_inspect'
-require_relative 'file_window'
 
 if ARGV.size != 1
   $stderr.puts "Usage: crypt32_dll_dump.rb DLLFILE"
@@ -55,21 +55,19 @@ def search_pe_file(f)
     raise "Could not find .rsrc section."
   end
   puts "Resource section size: " + resource_section_size.to_s
-  search_resource_section(
-    FileWindow.new(f, resource_section_offset, resource_section_size))
+  search_resource_section(f, resource_section_offset)
 end
 
-def search_resource_section(f)
-  puts "Resource section: 0x%x" % f.window_offset
-  section = f.read
+def search_resource_section(f, section_offset)
+  puts "Resource section: 0x%x" % section_offset
 
-  search_resource_directory(section, f, 0, [])
+  search_resource_directory(f, section_offset, section_offset, [])
 
   # 2nd-level: 6 u32s
   # 3rd-level: 4 u32s
 end
 
-def search_resource_directory(section, f, offset, path)
+def search_resource_directory(f, section_offset, offset, path)
   f.seek(offset)
 
   dir_header = f.read(16).unpack('L<L<S<S<S<S<')
@@ -79,30 +77,32 @@ def search_resource_directory(section, f, offset, path)
   name_entries_count.times do
     name_offset, offset = f.read(8).unpack('L<L<')
     type = offset[31] == 1 ? :directory : :leaf
-    offset &= 0x7FFF_FFFF
-    name_offset &= 0x7FFF_FFFF
-    name_size = section[name_offset, 2].unpack('S<')[0] * 2
-    name = section[name_offset + 2, name_size]
-    name = name.force_encoding('UTF-16LE').encode('UTF-8')
+    offset = section_offset + (offset & 0x7FFF_FFFF)
+    name_offset = section_offset + (name_offset & 0x7FFF_FFFF)
+    name = f.preserve_position do
+      f.seek(name_offset)
+      name_size = f.read(2).unpack('S<')[0] * 2
+      f.read(name_size).force_encoding('UTF-16LE').encode('UTF-8')
+    end
     entries << [type, name, offset]
   end
   id_entries_count.times do
     id, offset = f.read(8).unpack('L<L<')
     type = offset[31] == 1 ? :directory : :leaf
-    offset &= 0x7FFF_FFFF
+    offset = section_offset + (offset & 0x7FFF_FFFF)
     entries << [type, id, offset]
   end
 
   entries.each do |type, id, offset|
     if type == :directory
-      search_resource_directory(section, f, offset, path + [id])
+      search_resource_directory(f, section_offset, offset, path + [id])
     else
-      search_resource_leaf(section, f, offset, path + [id])
+      search_resource_leaf(f, section_offset, offset, path + [id])
     end
   end
 end
 
-def search_resource_leaf(section, f, offset, path)
+def search_resource_leaf(f, section_offset, offset, path)
   f.seek(offset)
   leaf = f.read(16).unpack('L<L<L<L<')
   address, size, _, _ = leaf
