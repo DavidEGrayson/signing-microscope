@@ -41,6 +41,7 @@ def search_pe_file(f)
 
   resource_section_offset = nil
   resource_section_size = nil
+  resource_section_virtual_address = nil
   section_count.times do
     section_header = f.read(40).unpack('Z8L<L<L<L<L<L<S<S<L<')
     name, virtual_size, virtual_address, raw_data_size, raw_data_offset,
@@ -48,6 +49,7 @@ def search_pe_file(f)
     if name == ".rsrc"
       resource_section_size = raw_data_size
       resource_section_offset = raw_data_offset
+      resource_section_virtual_address = virtual_address
     end
   end
 
@@ -55,14 +57,14 @@ def search_pe_file(f)
     raise "Could not find .rsrc section."
   end
   puts "Resource section size: " + resource_section_size.to_s
-  search_resource_section(f, resource_section_offset)
+  search_resource_section(f, resource_section_offset, resource_section_virtual_address)
 end
 
-def search_resource_section(f, section_offset)
-  search_resource_directory(f, section_offset, section_offset, [])
+def search_resource_section(f, section_offset, virtual_address)
+  search_resource_directory(f, section_offset, virtual_address, section_offset, [])
 end
 
-def search_resource_directory(f, section_offset, offset, path)
+def search_resource_directory(f, section_offset, virtual_address, offset, path)
   f.seek(offset)
 
   dir_header = f.read(16).unpack('L<L<S<S<S<S<')
@@ -90,18 +92,18 @@ def search_resource_directory(f, section_offset, offset, path)
 
   entries.each do |type, id, offset|
     if type == :directory
-      search_resource_directory(f, section_offset, offset, path + [id])
+      search_resource_directory(f, section_offset, virtual_address, offset, path + [id])
     else
-      search_resource_leaf(f, offset, path + [id])
+      search_resource_leaf(f, section_offset, virtual_address, offset, path + [id])
     end
   end
 end
 
-def search_resource_leaf(f, offset, path)
+def search_resource_leaf(f, section_offset, virtual_address, offset, path)
   f.seek(offset)
   leaf = f.read(16).unpack('L<L<L<L<')
   data_offset, size, _, _ = leaf
-  data_offset -= 0x2000   # Weird, I don't get it
+  data_offset += section_offset - virtual_address
   puts "Leaf %s, offset 0x%X, size %d" % [path.inspect, data_offset, size]
   f.seek(data_offset)
 
@@ -109,25 +111,28 @@ def search_resource_leaf(f, offset, path)
 
   case path.first
   when 'AUTHROOTS', 'UPDROOTS'
-    parse_cert_list(f, data_offset, size)
+    parse_cert_sst(f, data_offset, size)
   when 'AUTHROOTSTL'
     parse_cert_stl(f, data_offset, size)
   end
 end
 
-def parse_cert_list(f, offset, size)
+# Parse a Microsoft Serialized Certificate Store (SST)
+def parse_cert_sst(f, offset, size)
   f.seek(offset)
   start = f.read(8)
   if start != "\x00\x00\x00\x00CERT"
     raise "Cert list at 0x%x does not start with magic sequence." % offset
   end
 
-  # TODO
+  # TODO:
 end
 
 def parse_cert_stl(f, offset, size)
   f.seek(offset)
   stl = f.read(size)
+
+  p stl[0,400]
 
   # TODO
 
