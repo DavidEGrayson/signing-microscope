@@ -59,12 +59,7 @@ def search_pe_file(f)
 end
 
 def search_resource_section(f, section_offset)
-  puts "Resource section: 0x%x" % section_offset
-
   search_resource_directory(f, section_offset, section_offset, [])
-
-  # 2nd-level: 6 u32s
-  # 3rd-level: 4 u32s
 end
 
 def search_resource_directory(f, section_offset, offset, path)
@@ -97,17 +92,52 @@ def search_resource_directory(f, section_offset, offset, path)
     if type == :directory
       search_resource_directory(f, section_offset, offset, path + [id])
     else
-      search_resource_leaf(f, section_offset, offset, path + [id])
+      search_resource_leaf(f, offset, path + [id])
     end
   end
 end
 
-def search_resource_leaf(f, section_offset, offset, path)
+def search_resource_leaf(f, offset, path)
   f.seek(offset)
   leaf = f.read(16).unpack('L<L<L<L<')
-  address, size, _, _ = leaf
-  puts "Leaf %s at %d: 0x%x %d" % [path.inspect, offset, address, size]
+  data_offset, size, _, _ = leaf
+  data_offset -= 0x2000   # Weird, I don't get it
+  puts "Leaf %s, offset 0x%X, size %d" % [path.inspect, data_offset, size]
+  f.seek(data_offset)
+
+  puts 'interesting!' if data_offset <= 0x13548B && 0x13548B < data_offset + size
+
+  case path.first
+  when 'AUTHROOTS', 'UPDROOTS'
+    parse_cert_list(f, data_offset, size)
+  when 'AUTHROOTSTL'
+    parse_cert_stl(f, data_offset, size)
+  end
 end
 
+def parse_cert_list(f, offset, size)
+  f.seek(offset)
+  start = f.read(8)
+  if start != "\x00\x00\x00\x00CERT"
+    raise "Cert list at 0x%x does not start with magic sequence." % offset
+  end
+
+  # TODO
+end
+
+def parse_cert_stl(f, offset, size)
+  f.seek(offset)
+  stl = f.read(size)
+
+  # TODO
+
+  #puts start.hex_inspect
+  #puts start.inspect
+  #require 'openssl'
+  #pk = OpenSSL::PKCS7.read_smime(stl)
+  #puts pk.certificates.size
+end
+
+$stdout.sync = true
 f = File.open(filename, 'rb')
 search_pe_file(f)
