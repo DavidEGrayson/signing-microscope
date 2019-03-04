@@ -11,13 +11,6 @@ end
 
 require_relative 'hex_inspect'
 
-if ARGV.size != 1
-  $stderr.puts "Usage: crypt32_dll_dump.rb DLLFILE"
-end
-
-filename = ARGV.fetch(0)
-file_size = File.size(filename)
-
 def search_pe_file(f)
   f.seek(0x3C)
   pe_signature_offset = f.read(4).unpack('L<')[0]
@@ -58,6 +51,7 @@ def search_pe_file(f)
   end
   puts "Resource section size: " + resource_section_size.to_s
   search_resource_section(f, resource_section_offset, resource_section_virtual_address)
+  puts
 end
 
 def search_resource_section(f, section_offset, virtual_address)
@@ -117,6 +111,8 @@ def search_resource_leaf(f, section_offset, virtual_address, offset, path)
   end
 end
 
+require 'digest'
+
 # Parse a Microsoft Serialized Certificate Store (SST)
 def parse_cert_sst(f, offset, size)
   f.seek(offset)
@@ -125,6 +121,11 @@ def parse_cert_sst(f, offset, size)
     raise "Cert list at 0x%x does not start with magic sequence." % offset
   end
 
+  f.seek(offset)
+  sst = f.read(size)
+  puts "SST size = " + sst.size.to_s
+  puts "SST hash = " + Digest::SHA256.hexdigest(sst)
+
   # TODO:
 end
 
@@ -132,7 +133,8 @@ def parse_cert_stl(f, offset, size)
   f.seek(offset)
   stl = f.read(size)
 
-  p stl[0,400]
+  puts "STL size = " + stl.size.to_s
+  puts "STL hash = " + Digest::SHA256.hexdigest(stl)
 
   # TODO
 
@@ -144,5 +146,14 @@ def parse_cert_stl(f, offset, size)
 end
 
 $stdout.sync = true
-f = File.open(filename, 'rb')
-search_pe_file(f)
+
+if ARGV.size < 1
+  $stderr.puts "Usage: crypt32_dll_dump.rb DLLFILE"
+end
+
+ARGV.each do |filename|
+  puts "File: #{filename}"
+  filename = ARGV.fetch(0)
+  f = File.open(filename, 'rb')
+  search_pe_file(f)
+end
